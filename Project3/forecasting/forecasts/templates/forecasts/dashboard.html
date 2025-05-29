@@ -1,0 +1,214 @@
+{% load custom_filters %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forecast Dashboard</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+    <style>
+        .dashboard-container {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            align-items: center; /* Ensure alignment at the same height */
+        }
+
+        .kpi-main-container {
+            flex: 2; /* 2/3 of the space */
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .kpi-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .kpi-box {
+            flex: 1;
+            padding: 20px;
+            background-color: #17a2b8;
+            color: white;
+            text-align: center;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .occupancy-rate {
+            flex: 1; /* 1/3 of the space */
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .percentage-circle {
+            background: conic-gradient(#007bff 0% 63%, #eee 63% 100%);
+            border-radius: 50%;
+            width: 200px; /* Adjust as needed */
+            height: 200px; /* Adjust as needed */
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px; /* Adjust as needed */
+            color: black; /* Text color */
+        }
+
+        .percentage-text {
+            position: absolute;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+        }
+
+        .carousel {
+            margin-bottom: 20px;
+        }
+
+        .btn-custom {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 10px 20px;
+            font-size: 16px;
+            transition: background-color 0.2s, transform 0.2s;
+        }
+
+        .btn-custom:hover {
+            background-color: #0056b3;
+            transform: scale(1.05);
+        }
+
+        .graph-buttons { display: flex; justify-content: space-between; }
+
+        /* .carousel .carousel-inner {
+            width: 100%; /* Ensure the inner carousel is full width 
+        } */
+
+        /* .carousel-item {
+            display: none; /* This ensures that carousel items are hidden by default 
+            width: 100%;
+            height: auto;
+        } */
+
+        .carousel-item.active,
+        .carousel-item-next,
+        .carousel-item-prev {
+            display: block;
+        }
+        .test{
+            display: block;
+        }
+/* 
+        .carousel-item > div {
+            width: 100%; /* This ensures that content within carousel items fills the width 
+            height: auto; /* Adjust the height as needed, or keep it auto 
+        } */
+    </style>
+</head>
+<body>
+<div class="container mt-5">
+    <h1>Dashboard Metrics</h1>
+    
+    <div class="dashboard-container">
+        <!-- Div 1: KPI Groups -->
+        <div class="kpi-main-container">
+            <!-- KPI Group 1: RevPAR and ADR -->
+            <div class="kpi-group">
+                <div class="kpi-box">
+                    <div>Daily RevPAR</div>
+                    <div>{{ kpis|get_item:"Daily RevPAR" }}</div>
+                </div>
+                <div class="kpi-box">
+                    <div>Average Daily Rate (ADR)</div>
+                    <div>{{ kpis|get_item:"ADR" }}</div>
+                </div>
+            </div>
+
+            <!-- KPI Group 2: ALOS and Annual RevPAR -->
+            <div class="kpi-group">
+                <div class="kpi-box">
+                    <div>Average Length of Stay (ALOS)</div>
+                    <div>{{ kpis|get_item:"ALOS" }}</div>
+                </div>
+                <div class="kpi-box">
+                    <div>Cumulative Annual RevPAR</div>
+                    <div>{{kpis|get_item:"Cumulative Annual RevPAR" }}</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Div 2: Occupancy Rate -->
+        <div class="occupancy-rate">
+            <div class="percentage-circle">
+                <span class="percentage-text">{{ kpis|get_item:"Occupancy Rate" }}</span>
+            </div>
+            <div color="black">Occupancy Rate</div>
+        </div>
+    </div>
+
+    <h1>Forecasting Results</h1>
+    <!-- Forecasting Graphs -->
+    <div id="carouselExampleIndicators" class="carousel slide" data-interval="false">
+        <div class="carousel-inner">
+            <div class="carousel-item active"> <div id="graph1">{{ plot_div|safe }}</div> </div>
+            <div class="carousel-item" > <div id="graph2">{{ plot_div_weekly|safe }}</div> </div>
+            <div class="carousel-item"> <div id="graph3">{{ plot_div_monthly|safe }}</div> </div>
+            <div class="carousel-item"> <div id="graph4">{{ plot_div_yearly|safe }}</div> </div>
+        </div>
+        <div class="graph-buttons">
+            <button class="btn-custom" onclick="$('#carouselExampleIndicators').carousel('prev')">Previous</button>
+            <button class="btn-custom" onclick="$('#carouselExampleIndicators').carousel('next')">Next</button>
+        </div>
+    </div>
+    
+    <div id="carouselExampleIndicators2" class="carousel slide" data-interval="false">
+        <div class="carousel-inner">
+            <div class="carousel-item active"> <div id="graph5">{{ plot_div_bookings|safe }}</div> </div>
+            <div class="carousel-item "> <div id="graph6">{{ plot_div_weekly_bookings|safe }}</div> </div>
+            <div class="carousel-item "> <div id="graph7">{{ plot_div_monthly_bookings|safe }}</div> </div>
+            <div class="carousel-item "> <div id="graph8">{{ plot_div_yearly_bookings|safe }}</div> </div>
+        </div>
+        <div class="graph-buttons">
+            <button class="btn-custom" onclick="$('#carouselExampleIndicators2').carousel('prev')">Previous</button>
+            <button class="btn-custom" onclick="$('#carouselExampleIndicators2').carousel('next')">Next</button>
+        </div>
+    </div>
+</div>
+<script>
+    $(document).ready(function() {
+        // Function to adjust the size of Plotly graphs
+        function adjustGraphs() {
+            var activeCarouselId = $('.carousel-item.active').find('div[id^="graph"]').attr('id');
+            if (activeCarouselId && typeof Plotly !== 'undefined') {
+                Plotly.Plots.resize(document.getElementById(activeCarouselId));
+            }
+        }
+    
+        // When the carousel slides, adjust the size of the newly active graph
+        $('#carouselExampleIndicators, #carouselExampleIndicators2').on('slid.bs.carousel', function () {
+            adjustGraphs();
+        });
+    
+        // Initial adjustment for the first graph; slight delay to ensure the page is fully loaded
+        setTimeout(adjustGraphs, 500);
+        
+        // Adjust the graph when the window is resized
+        $(window).resize(function() {
+            adjustGraphs();
+        });
+    });
+</script>    
+</body>
+</html>

@@ -1,0 +1,32 @@
+[2024-04-11 23:29:18,004: WARNING/MainProcess] C:\Users\User\OneDrive\Desktop\Project3\venv\Lib\site-packages\celery\worker\consumer\consumer.py:507: CPendingDeprecationWarning:
+
+The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+
+
+[2024-04-11 23:29:18,020: INFO/MainProcess] Connected to redis://127.0.0.1:6379//
+[2024-04-11 23:29:18,021: WARNING/MainProcess] C:\Users\User\OneDrive\Desktop\Project3\venv\Lib\site-packages\celery\worker\consumer\consumer.py:507: CPendingDeprecationWarning:
+
+The broker_connection_retry configuration setting will no longer determine
+whether broker connection retries are made during startup in Celery 6.0 and above.
+If you wish to retain the existing behavior for retrying connections on startup,
+you should set broker_connection_retry_on_startup to True.
+
+
+[2024-04-11 23:29:18,055: INFO/MainProcess] mingle: searching for neighbors
+[2024-04-11 23:29:19,153: INFO/MainProcess] mingle: all alone
+[2024-04-11 23:29:19,373: INFO/MainProcess] celery@DESKTOP-UPO0UKO ready.
+[2024-04-11 23:29:19,407: INFO/SpawnPoolWorker-4] child process 9764 calling self.run()
+[2024-04-11 23:29:19,443: INFO/SpawnPoolWorker-1] child process 9844 calling self.run()
+[2024-04-11 23:29:19,475: INFO/SpawnPoolWorker-2] child process 17716 calling self.run()
+[2024-04-11 23:29:19,535: INFO/SpawnPoolWorker-3] child process 10808 calling self.run()
+[2024-04-11 23:29:28,930: INFO/SpawnPoolWorker-5] child process 18748 calling self.run()
+[2024-04-11 23:30:11,949: INFO/MainProcess] Task forecasts.tasks.optimize_prophet_parameters[f954a481-39a1-4017-9d53-67895a6388a0] received
+[2024-04-11 23:30:11,959: INFO/MainProcess] Task forecasts.tasks.optimize_parameters[0f8f9581-6469-4a3c-a63d-f6b41ceb47f3] received
+[2024-04-11 23:30:19,440: INFO/SpawnPoolWorker-6] child process 17480 calling self.run()
+[2024-04-11 23:30:19,441: INFO/SpawnPoolWorker-9] child process 16664 calling self.run()
+[2024-04-11 23:30:19,447: INFO/SpawnPoolWorker-8] child process 14572 calling self.run()
+[2024-04-11 23:30:36,104: INFO/SpawnPoolWorker-10] child process 22072 calling self.run()
+[2024-04-11 23:30:52,406: WARNING/MainProcess] Restoring 2 unacknowledged message(s)

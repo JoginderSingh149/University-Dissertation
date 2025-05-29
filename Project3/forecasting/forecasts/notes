@@ -1,0 +1,1054 @@
+###################################################################################### views.py with gdp
+from django.shortcuts import render
+
+# Create your views here.
+import pandas as pd
+from django.shortcuts import render, redirect
+from .forms import UploadFileForm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from plotly.offline import plot
+from plotly.graph_objs import Scatter
+
+from django.shortcuts import render
+import pandas as pd
+from django.conf import settings
+import os
+from plotly.offline import plot
+from plotly.graph_objs import Scatter, Layout
+import pandas as pd
+from pandas.tseries.offsets import DateOffset
+from plotly.graph_objs import Scatter, Layout, Figure
+
+import pandas as pd
+from django.conf import settings
+import os
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import numpy as np
+from .models import BookingData
+from django.db.models import Max
+from django.utils import timezone
+from django.db import transaction
+
+from forecasts.models import BookingData, OptimizationParameters, ProphetOptimizationParameters
+import itertools
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import warnings
+from django.db.models import Max
+warnings.filterwarnings("ignore")
+from django.db.models import Sum
+from django.db.models.functions import ExtractWeek, ExtractYear
+from celery import shared_task
+
+from .tasks import optimize_parameters,optimize_prophet_parameters#add
+#optimize_parameters_async, test_logging_task, optimize_parameters, add
+
+# Import any other necessary libraries here
+from prophet import Prophet
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+
+# Define a function to calculate RMSE within your Django app views.py or utils.py
+def calculate_rmse(y_true, y_pred):
+    return np.sqrt(mean_squared_error(y_true, y_pred))
+
+def upload_file(request):
+    if request.method == 'POST':
+        form = UploadFileForm(request.POST, request.FILES)
+        if form.is_valid():
+            handle_uploaded_file(request.FILES['file'])
+            #test_logging_task()
+            return redirect('dashboard')
+        
+    else:
+        form = UploadFileForm()
+    return render(request, 'forecasts/upload.html', {'form': form})
+
+
+def handle_uploaded_file(f):
+
+    df = pd.read_csv(f)
+    df['Check In'] = pd.to_datetime(df['Check In'], format='%d/%m/%Y %H:%M')
+    df['Check In'] = df['Check In'].apply(lambda x: timezone.make_aware(x, timezone.get_default_timezone()))
+    df.sort_values(by='Check In', inplace=True)
+    
+    # Correct extraction and conversion for 'Nights' if necessary
+    # Assuming 'Nights' is already in a correct format, based on your script
+    # Ensure 'Nights' only contains numeric values
+    df['Nights'] = df['Nights'].str.extract('(\\d+)').astype(float)
+
+    # Correctly identifying bookings with a unique identifier
+    df['Number_of_Bookings'] = 1
+    
+    # It seems like the dropping of unnecessary columns didn't occur as expected before.
+    # Ensure you only keep columns necessary for the aggregation step.
+    df = df[['Check In', 'Nights', 'Guest', 'Total', 'Number_of_Bookings']]
+    
+    # Aggregating data
+    daily_records = df.groupby('Check In').agg({'Nights': 'sum', 'Guest': 'sum', 'Total': 'sum', 'Number_of_Bookings': 'sum'})
+    
+    # No need to rename columns since they are already correctly named after aggregation
+    print("Daily records shape after processing:", daily_records.shape)
+    print("Daily records columns after processing:", daily_records.columns.tolist())
+
+    # Proceed with your forecasting logic...
+    df = df[df['Total'] != 0]
+    #df.drop(['Booking Source', 'Check Out', 'Room'], axis=1, inplace=True)
+    
+    #daily_records = df.groupby('Check In').sum()
+    daily_records.reset_index(inplace=True)
+    daily_records.columns = ['Check In', 'Nights', 'Guest', 'Total', 'Number_of_Bookings']
+    daily_records['Check In'] = daily_records['Check In'].dt.tz_localize(None)
+    daily_records.set_index('Check In', inplace=True)
+    daily_records = daily_records.resample('W').sum()
+    daily_records.reset_index(inplace=True)
+    daily_records.set_index("Check In", inplace=True)
+    train_size = int(0.8 * len(daily_records))
+    train_data = daily_records.iloc[:train_size]
+    test_data = daily_records.iloc[train_size:]
+    
+    bookings = [BookingData(check_in=row['Check In'], nights=row['Nights'], guest=row['Guest'], total=row['Total'], number_of_bookings=row['Number_of_Bookings']) for index, row in df.iterrows()]
+    # Bulk create to insert new records, ignoring conflicts to avoid duplicates
+    BookingData.objects.bulk_create(bookings, ignore_conflicts=True)
+
+    actual_revenue = df.groupby('Check In')['Total'].sum().reset_index()
+    # Ensure 'Check In' column is in the right format
+    actual_revenue['Check In'] = pd.to_datetime(actual_revenue['Check In'])
+    actual_revenue.set_index('Check In', inplace=True)  # Set 'Check In' as the index
+    actual_revenue = actual_revenue.resample('W').sum()
+    # Save to CSV in a similar format to forecasts.csv
+    actual_csv_path = os.path.join(settings.BASE_DIR, 'actual.csv')
+    actual_revenue.to_csv(actual_csv_path, index=True)
+
+    actual_bookings = df.groupby('Check In')['Number_of_Bookings'].sum().reset_index()
+    # Ensure 'Check In' column is in the right format
+    actual_bookings['Check In'] = pd.to_datetime(actual_bookings['Check In'])
+    actual_bookings.set_index('Check In', inplace=True)  # Set 'Check In' as the index
+    actual_bookings = actual_bookings.resample('W').sum()
+    # Save to CSV in a similar format to forecasts.csv
+    actual_bookings_csv_path = os.path.join(settings.BASE_DIR, 'actual_bookings.csv')
+    actual_bookings.to_csv(actual_bookings_csv_path, index=True)
+
+    gdp_data_path = os.path.join(settings.BASE_DIR, 'GDP.csv')
+    gdp_data = pd.read_csv(gdp_data_path)
+    gdp_data['DATE'] = pd.to_datetime(gdp_data['DATE']).dt.tz_localize(None)
+    gdp_data.set_index('DATE', inplace=True)
+
+   # daily_records.reset_index()
+    #daily_records['Check In'] = daily_records['Check In'].dt.tz_localize(None)
+    #daily_records.set_index('Check In', inplace=True)
+    #gdp_aligned = gdp_data.reindex(df.index, method='nearest')
+    gdp_aligned = gdp_data.reindex(daily_records.index, method='nearest')['GDP']
+
+    with transaction.atomic():
+        if not OptimizationParameters.objects.exists():
+            OptimizationParameters.objects.create(p=1, d=0, q=1, seasonal_p=2, seasonal_d=1, seasonal_q=0, s=12)
+            
+            ProphetOptimizationParameters.objects.get_or_create(defaults={'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 15, 'yearly_seasonality': True})
+
+    # Assuming the selection of order and seasonal_order from your script
+    #order = (1, 0, 1)      
+    #seasonal_order = (2, 1, 0, 12)
+    latest_params = OptimizationParameters.objects.latest('last_updated')
+    order = (latest_params.p, latest_params.d, latest_params.q)
+    seasonal_order = (latest_params.seasonal_p, latest_params.seasonal_d, latest_params.seasonal_q, latest_params.s)
+
+    model = SARIMAX(train_data['Total'], exog=gdp_aligned.loc[train_data.index], order=order, seasonal_order=seasonal_order, enforce_stationarity=False, enforce_invertibility=False)
+    model_fit = model.fit()
+    model2 = SARIMAX(train_data['Total'], order=order, seasonal_order=seasonal_order, enforce_stationarity=False, enforce_invertibility=False)
+    model_fit2 = model2.fit()
+
+    # Save the model or forecasted data for use in the dashboard view
+    #forecast = model_fit.forecast(steps=52)  # Forecasting for 52 weeks as an example
+    start_idx = len(train_data)
+    end_idx = len(train_data) + len(test_data) - 1
+    #future_gdp = gdp_data.loc[test_data.index] 
+    #forecast1 = model_fit.predict(start=start_idx, end=end_idx, dynamic=False, exog=future_gdp)
+    future_gdp = gdp_data.reindex(test_data.index, method='nearest')['GDP']
+    forecast1 = model_fit.predict(start=start_idx, end=end_idx, dynamic=False, exog=future_gdp)
+    #forecast2 = model_fit.predict(start=start_idx, end=end_idx, dynamic=False, exog=future_gdp)
+
+    #forecast.to_frame(name='Forecasted_Total').to_csv(os.path.join(settings.BASE_DIR, 'forecasts.csv'))
+    # When saving forecasted data
+    #forecast.to_frame(name='Forecasted_Total').reset_index().to_csv(os.path.join(settings.BASE_DIR, 'forecasts.csv'), index=False)
+    # Adjust this line in your handle_uploaded_file function or wherever you save the forecast data to ensure 'Check In' is included
+    forecast1.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts.csv'), index=False)
+
+    train_data.reset_index(inplace=True)          
+    train_data['Check In'] = pd.to_datetime(train_data['Check In'], format='%d/%m/%Y %H:%M')
+    train_data.sort_values(by='Check In', inplace=True)
+
+   # Make 'Check In' timezone-aware (You've done this)
+    #df['Check In'] = df['Check In'].apply(lambda x: timezone.make_aware(x, timezone.get_default_timezone()))
+
+    # Prepare data for Prophet
+    train_data['ds'] = train_data['Check In'].dt.tz_localize(None)  # Convert to timezone-naive
+
+    train_data['y'] = train_data['Total']  # Assuming 'Total' is your target variable
+
+    # Fetch the latest Prophet optimization parameters
+    latest_prophet_params = ProphetOptimizationParameters.objects.latest('last_updated')
+    changepoint_prior_scale = latest_prophet_params.changepoint_prior_scale
+    seasonality_prior_scale = latest_prophet_params.seasonality_prior_scale
+    yearly_seasonality = True#latest_prophet_params.yearly_seasonality
+
+    # Initialize and fit the Prophet model
+    model_prophet = Prophet(
+        changepoint_prior_scale=changepoint_prior_scale,
+        seasonality_prior_scale=seasonality_prior_scale,
+        yearly_seasonality=yearly_seasonality
+    )
+    model_prophet.fit(train_data)
+
+    # Forecast with the Prophet model
+    future_prophet = model_prophet.make_future_dataframe(periods=len(test_data), freq='W')
+    forecast_prophet = model_prophet.predict(future_prophet)
+
+    # Save the Prophet forecast to CSV
+    forecast_prophet[['ds', 'yhat']].rename(columns={'ds': 'Check In', 'yhat': 'Forecasted_Total'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet.csv'), index=False)
+    #forecast_prophet.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_weekly.csv'), index=False)
+
+
+    # Forecast for 54 weeks after January 2024 (weekly)
+    #future_forecast_weekly = model_fit.forecast(steps=54)
+    future_gdp_for_forecast = future_gdp.iloc[:54]
+    future_forecast_weekly = model_fit.forecast(steps=54, exog=future_gdp_for_forecast)
+    future_forecast_monthly = future_forecast_weekly.resample('M').sum()
+    future_forecast_weekly.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_weekly.csv'), index=False)
+    future_forecast_monthly.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_monthly.csv'), index=False)
+
+
+    weekly_prophet = model_prophet.make_future_dataframe(periods=84+15+50, include_history=False, freq='W')
+    #start_prediction_date = '2024-01-01'
+    #end_prediction_date = '2025-01-01'  # Example end date, adjust as needed
+     # Generate future dates starting from 2024-01-01
+     #future_dates = pd.date_range(start=start_prediction_date, end=end_prediction_date, freq='W').to_frame(index=False, name='ds')
+    forecast_prophet_weekly = model_prophet.predict(weekly_prophet)
+    forecast_prophet_weekly = forecast_prophet_weekly.tail(67)
+    forecast_prophet_weekly = forecast_prophet_weekly[
+    (forecast_prophet_weekly['ds'] >= '2024-01-01') & (forecast_prophet_weekly['ds'] <= '2025-01-01')
+    ].copy()
+    # forecast_prophet_weekly = forecast_prophet_weekly[(forecast_prophet_weekly['ds'] >= '2024-01-01') & (forecast_prophet_weekly['ds'] <= '2025-01-01')].copy()
+    forecast_prophet_weekly[['ds', 'yhat']].rename(columns={'ds': 'Check In', 'yhat': 'Forecasted_Total'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet_weekly.csv'), index=False)
+    
+    forecast_prophet_weekly.set_index("ds", inplace=True)
+    forecast_prophet_monthly = forecast_prophet_weekly['yhat'].resample('M').sum().reset_index()
+
+    #forecast_prophet_monthly = forecast_prophet_weekly.resample('M').sum()
+
+    forecast_prophet_monthly[['ds', 'yhat']].rename(columns={'ds': 'Check In', 'yhat': 'Forecasted_Total'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet_monthly.csv'), index=False)
+
+    # # model_prophet.fit(df[['ds', 'y']])
+
+    # # Forecast for weekly period from 2024-01-01 to 2025-01-01
+    # future_dates = pd.date_range(start='2024-01-01', end='2025-01-01', freq='W').to_frame(index=False, name='ds')
+    # forecast_prophet_weekly = model_prophet.predict(future_dates)
+    # forecast_prophet_weekly[['ds', 'yhat']].rename(columns={'ds': 'Check In', 'yhat': 'Forecasted_Total'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet_weekly.csv'), index=False)
+
+#    future_forecast_weekly2 = model_fit.forecast(steps=52 * 6)
+    # If you have more than 312 future GDP values in your dataset
+# and need to select the first 312 for your forecast
+    #future_gdp_corrected = future_gdp.iloc[:312]
+    future_forecast_weekly2 = model_fit2.forecast(steps=(52*6))#, exog=future_gdp_corrected)
+    future_forecast_monthly2 = future_forecast_weekly2.resample('M').sum()
+    future_forecast_yearly = future_forecast_monthly2.resample('Y').sum()
+    future_forecast_yearly.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_yearly.csv'), index=False)
+
+    weekly_prophet2 = model_prophet.make_future_dataframe(periods=84+(52*6), include_history=False, freq='W')
+    forecast_prophet_weekly2 = model_prophet.predict(weekly_prophet2)
+    # Remove the first 84 rows
+    forecast_prophet_weekly2 = forecast_prophet_weekly2.iloc[81:]
+    forecast_prophet_weekly2.set_index("ds", inplace=True)
+    forecast_prophet_monthly2 = forecast_prophet_weekly2['yhat'].resample('M').sum().reset_index()
+    # Resample the monthly aggregated DataFrame to yearly frequency and sum the values
+    forecast_prophet_monthly2.set_index("ds", inplace=True)
+    forecast_prophet_yearly = forecast_prophet_monthly2['yhat'].resample('Y').sum().reset_index()
+    forecast_prophet_yearly[['ds', 'yhat']].rename(columns={'ds': 'Check In', 'yhat': 'Forecasted_Total'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet_yearly.csv'), index=False)
+
+    train_data['Check In'] = train_data['ds'] # Convert to timezone-naive
+    train_data['Total'] = train_data['y']
+    train_data['Check In'] = pd.to_datetime(train_data['Check In'])
+# Set 'Check In' as the index
+    train_data.set_index('Check In', inplace=True)
+
+    model_bookings = SARIMAX(train_data['Number_of_Bookings'], order=order, seasonal_order=seasonal_order, enforce_stationarity=False, enforce_invertibility=False)
+    model_fit_bookings = model_bookings.fit()
+
+    forecast_bookings = model_fit_bookings.forecast(steps=52)
+    forecast_bookings.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_bookings.csv'), index=False)
+
+    #future_start_date = '2024-01-01' #change to last date in data
+    #future_end_date_weekly = pd.date_range(start=future_start_date, periods=54, freq='W')
+
+    # Forecast for 54 weeks after January 2024 (weekly)
+    future_forecast_weekly_bookings = model_fit_bookings.forecast(steps=52)
+    #future_forecast_weekly_bookings['Check In'] = pd.to_datetime(future_forecast_weekly_bookings['Check In'])
+# Set 'Check In' as the index
+   # future_forecast_weekly_bookings.set_index('Check In', inplace=True)
+    future_forecast_monthly_bookings = future_forecast_weekly_bookings.resample('M').sum()
+    future_forecast_weekly_bookings.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_weekly_bookings.csv'), index=False)
+    future_forecast_monthly_bookings.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_monthly_bookings.csv'), index=False)
+
+    future_forecast_weekly2_bookings = model_fit_bookings.forecast(steps=52 * 5)
+    future_forecast_monthly2_bookings = future_forecast_weekly2_bookings.resample('M').sum()
+    future_forecast_yearly_bookings = future_forecast_monthly2_bookings.resample('Y').sum()
+    future_forecast_yearly_bookings.to_frame(name='Forecasted_Total').reset_index().rename(columns={'index': 'Check In'}).to_csv(os.path.join(settings.BASE_DIR, 'forecasts_yearly_bookings.csv'), index=False)
+
+    '''CREATE_FIGURE GRAPHS HERE????'''
+    #optimize_parameters()
+    #test_logging_task()#.delay()
+    #optimize_parameters_async.delay()
+    optimize_prophet_parameters.delay()
+    optimize_parameters.delay()
+    
+  
+
+# Note: This simplified example forecasts only 'Total' for demonstration. Adapt it to include bookings or any other metrics as needed.
+
+from django.shortcuts import render
+import pandas as pd
+from django.conf import settings
+import os
+from plotly.graph_objects import Scatter, Layout, Figure    
+
+def dashboard(request):
+ 
+      # Load SARIMAX forecasts
+    forecast_sarimax_df = pd.read_csv(os.path.join(settings.BASE_DIR, 'forecasts.csv'))
+    forecast_sarimax_df['Check In'] = pd.to_datetime(forecast_sarimax_df['Check In'])
+
+    # Load Prophet forecasts
+    forecast_prophet_df = pd.read_csv(os.path.join(settings.BASE_DIR, 'forecasts_prophet.csv'))
+    forecast_prophet_df['Check In'] = pd.to_datetime(forecast_prophet_df['Check In'])
+
+    # Assuming actual_df is loaded similarly for test data period
+    actual_df_path = os.path.join(settings.BASE_DIR, 'actual.csv')
+    actual_df = pd.read_csv(actual_df_path)
+    actual_df['Check In'] = pd.to_datetime(actual_df['Check In'])
+
+    # Ensure test_data range is defined
+    test_data_start_date = '2022-06-12'  # Adjust to your test data's start date
+    test_data_end_date = '2023-06-04'    # Adjust to your test data's end date
+
+    # Filter the forecasts and actual data for the test data period
+    forecast_sarimax_df_1 = forecast_sarimax_df[(forecast_sarimax_df['Check In'] >= test_data_start_date) & (forecast_sarimax_df['Check In'] <= test_data_end_date)]
+    forecast_prophet_df_1 = forecast_prophet_df[(forecast_prophet_df['Check In'] >= test_data_start_date) & (forecast_prophet_df['Check In'] <= test_data_end_date)]
+    actual_df = actual_df[(actual_df['Check In'] >= test_data_start_date) & (actual_df['Check In'] <= test_data_end_date)]
+
+    # Print to check if there are data points in the test period
+    print(forecast_sarimax_df_1.head())
+    print(forecast_prophet_df_1.head())
+    print(actual_df.head())
+    # Ensure combined forecast calculation is performed correctly
+# Only perform calculation if both forecasts are not empty
+    if not forecast_sarimax_df_1.empty and not forecast_prophet_df_1.empty:
+        combined_forecast = (forecast_sarimax_df_1['Forecasted_Total'].reset_index(drop=True) + forecast_prophet_df_1['Forecasted_Total'].reset_index(drop=True)) / 2
+        # Create a new DataFrame for combined forecast with 'Check In' and 'Forecasted_Total' columns
+        combined_forecast_df = pd.DataFrame({
+            'Check In': forecast_sarimax_df_1['Check In'].reset_index(drop=True),
+            'Forecasted_Total': combined_forecast
+        })
+    else:
+        print("One of the forecasts is empty after filtering for the test period.")
+
+    # Combine forecasts
+    #combined_forecast = (forecast_sarimax_df_1['Forecasted_Total'] + forecast_prophet_df_1['Forecasted_Total']) / 2
+        
+    # Plot configuration
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=forecast_sarimax_df_1['Check In'], y=actual_df['Total'], mode='lines', name='Actual Revenue'))
+    fig.add_trace(go.Scatter(x=forecast_sarimax_df_1['Check In'], y=forecast_sarimax_df_1['Forecasted_Total'], mode='lines', name='SARIMAX Forecast'))
+    fig.add_trace(go.Scatter(x=forecast_sarimax_df_1['Check In'], y=forecast_prophet_df_1['Forecasted_Total'], mode='lines', name='Prophet Forecast'))
+    #fig.add_trace(go.Scatter(x=forecast_sarimax_df_1['Check In'], y=combined_forecast, mode='lines', name='Combined Forecast'))
+    if not combined_forecast_df.empty:
+        fig.add_trace(go.Scatter(x=combined_forecast_df['Check In'], y=combined_forecast_df['Forecasted_Total'], mode='lines', name='Combined Forecast', line=dict(color='purple')))
+    else:
+        print("Combined forecast DataFrame is empty.")
+
+    # Update plot layout
+    fig.update_layout(title="Forecast vs Actual Comparison for Test Period", xaxis_title="Date", yaxis_title="Total (£)")
+
+    plot_div = plot(fig, output_type='div')
+
+    # # Rendering the graph in the template
+    # # plot_div = fig.to_html(full_html=False)
+    # forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts.csv')
+    # forecast_sarimax_df = pd.read_csv(forecast_sarimax_df_path)
+
+    # actual_df_path = os.path.join(settings.BASE_DIR, 'actual.csv')
+    # actual_df = pd.read_csv(actual_df_path)
+    
+    # # Assuming your forecast_sarimax_df has columns 'Check In', 'Forecasted_Total' for predictions,
+    # # and you have a way to get 'Actual_Total' into this DataFrame
+    # # For illustration, let's pretend 'Actual_Total' is also a column in forecast_sarimax_df
+    # # You would need to merge or calculate this column as per your actual vs predicted revenue logic
+
+    # forecast_sarimax_df['Check In'] = pd.to_datetime(forecast_sarimax_df['Check In'])
+    # actual_df['Check In'] = pd.to_datetime(actual_df['Check In'])
+
+    # # Create traces for actual and predicted revenue
+    # trace_actual = Scatter(x=forecast_sarimax_df['Check In'], y=actual_df['Total'], mode='lines', name='Actual Revenue')
+    # trace_predicted = Scatter(x=forecast_sarimax_df['Check In'], y=forecast_sarimax_df['Forecasted_Total'], mode='lines', name='Predicted Revenue')
+
+    # # Plot configuration
+    # plot_div = plot([trace_actual, trace_predicted], output_type='div')
+
+    weekly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_weekly.csv')
+    weekly_forecast_sarimax_df = pd.read_csv(weekly_forecast_sarimax_df_path)
+
+
+    weekly_prophet_df_path = os.path.join(settings.BASE_DIR, 'forecasts_prophet_weekly.csv')
+    weekly_prophet_df = pd.read_csv(weekly_prophet_df_path)
+
+    if 'Check In' not in weekly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+    weekly_prophet_df['Check In'] = pd.to_datetime(weekly_prophet_df['Check In']).dt.tz_localize(None)
+
+    #weekly_forecast_sarimax_df['Check In'] = pd.to_datetime(weekly_forecast_sarimax_df['Check In']).dt.tz_localize(None)
+    #weekly_forecast_sarimax_df = weekly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    future_start_date = '2024-01-01' #change to final date in csv
+    
+    weekly_forecast_sarimax_df = pd.DataFrame({
+        'Check In': pd.date_range(start=future_start_date, periods=len(weekly_forecast_sarimax_df), freq='W'),
+        'SARIMAX_Forecast': weekly_forecast_sarimax_df['Forecasted_Total']  # Assuming future_forecast_weekly is correctly populated with forecast values
+    })
+    # sarimax_weekly_forecast_df = pd.DataFrame({
+    #     'Date': pd.date_range(start=future_start_date, periods=len(future_forecast_weekly1), freq='W'),
+    #     'SARIMAX_Forecast': future_forecast_weekly1  # Assuming future_forecast_weekly is correctly populated with forecast values
+    # })
+    future_end_date_weekly = pd.date_range(start=future_start_date, periods=54, freq='W')
+    #end_date_weekly = weekly_forecast_sarimax_df['Check In']
+    #forecast_sarimax_df['Check In'] = pd.to_datetime(forecast_sarimax_df['Check In']).dt.normalize()
+    print(weekly_forecast_sarimax_df.columns)
+    print(weekly_prophet_df.columns)
+    print(weekly_forecast_sarimax_df.head())
+    print(weekly_prophet_df.head())
+
+
+    combined_forecast_df = pd.merge(weekly_forecast_sarimax_df, weekly_prophet_df, on='Check In', how='inner')
+
+    if not combined_forecast_df.empty:
+
+        combined_forecast_df['Hybrid_Forecast'] = combined_forecast_df[['SARIMAX_Forecast', 'Forecasted_Total']].mean(axis=1)
+
+        print("SARIMAX Forecast Dates:")
+        print(weekly_forecast_sarimax_df['Check In'])
+
+        print("Prophet Forecast Dates:")
+        print(weekly_prophet_df['Check In'])
+
+        # Check the length of both DataFrames to ensure they are expected
+        print(f"Length of SARIMAX DataFrame: {len(weekly_forecast_sarimax_df)}")
+        print(f"Length of Prophet DataFrame: {len(weekly_prophet_df)}")
+
+        #weekly_prophet_df['Check In'] = pd.to_datetime(weekly_prophet_df['Check In']).dt.normalize()
+
+        #combined_forecast_df = pd.merge(weekly_forecast_sarimax_df, weekly_prophet_df, on='Check In', how='inner')
+
+        #combined_forecast_df['Hybrid_Forecast'] = combined_forecast_df[['SARIMAX_Forecast', 'Forecasted_Total']].mean(axis=1)
+        trace_sarimax = go.Scatter(x=combined_forecast_df['Check In'], y=combined_forecast_df['SARIMAX_Forecast'], mode='lines', name='SARIMAX Forecast')
+        trace_prophet = go.Scatter(x=combined_forecast_df['Check In'], y=combined_forecast_df['Forecasted_Total'], mode='lines', name='Prophet Forecast')
+        trace_hybrid = go.Scatter(x=combined_forecast_df['Check In'], y=combined_forecast_df['Hybrid_Forecast'], mode='lines', name='Hybrid Forecast')
+
+        layout = go.Layout(title='Weekly Forecast Comparison: SARIMAX vs. Prophet vs. Hybrid (2024-01-01 to 2025-01-01)', xaxis=dict(title='Date'), yaxis=dict(title='Forecast Value'))
+
+        fig2 = go.Figure(data=[trace_sarimax, trace_prophet, trace_hybrid], layout=layout)
+        #fig2 = Figure()
+        #fig2.add_trace(Scatter(x=future_end_date_weekly, y=weekly_forecast_sarimax_df, mode='lines+markers', name='monthly Forecast'))
+                            # output_type='div', include_plotlyjs=False)
+        fig2.update_layout(title='Forecasted weekly Revenue', xaxis_title='Date', yaxis_title='Revenue (£)')
+        fig2.show()
+
+        plot_div_weekly = fig2.to_html(full_html=False)
+
+    else:
+        print("The merged forecast DataFrame is empty. Check the alignment of dates.")
+        plot_div_weekly = None
+    # monthly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_monthly.csv')
+    # monthly_forecast_sarimax_df = pd.read_csv(monthly_forecast_sarimax_df_path)
+
+    # if 'Check In' not in monthly_forecast_sarimax_df.columns:
+    #     raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    # monthly_forecast_sarimax_df['Check In'] = pd.to_datetime(monthly_forecast_sarimax_df['Check In'])
+    # monthly_forecast_sarimax_df = monthly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    # future_start_date = '2024-01-01' #change to final date in csv
+    # future_end_date_monthly = pd.date_range(start='2024-01-01', end='2024-12-31', freq='MS')
+
+    
+    # #end_date_monthly = monthly_forecast_sarimax_df['Check In']
+    
+    # fig3 = Figure()
+    # # Example plot for future forecasts
+    # fig3.add_trace(Scatter(x=future_end_date_monthly, y=monthly_forecast_sarimax_df, mode='lines+markers', name='monthly Forecast'))
+    #                       # output_type='div', include_plotlyjs=False)
+    # fig3.update_layout(title='Forecasted monthly Revenue', xaxis_title='Date', yaxis_title='Revenue (£)')
+    # plot_div_monthly = fig3.to_html(full_html=False)
+        
+    # Load monthly SARIMAX forecasts
+    monthly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_monthly.csv')
+    monthly_forecast_sarimax_df = pd.read_csv(monthly_forecast_sarimax_df_path)
+
+    # Ensure 'Check In' column is present
+    if 'Check In' not in monthly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {monthly_forecast_sarimax_df.columns.tolist()}")
+
+    # Convert 'Check In' to datetime
+    #monthly_forecast_sarimax_df['Check In'] = pd.to_datetime(monthly_forecast_sarimax_df['Check In']).dt.tz_localize(None)
+    monthly_forecast_sarimax_df = pd.DataFrame({
+        'Check In': pd.date_range(start=future_start_date, periods=len(monthly_forecast_sarimax_df), freq='M'),
+        'SARIMAX_Forecast': monthly_forecast_sarimax_df['Forecasted_Total']  # Assuming future_forecast_weekly is correctly populated with forecast values
+    })
+    # Load monthly Prophet forecasts
+    monthly_prophet_df_path = os.path.join(settings.BASE_DIR, 'forecasts_prophet_monthly.csv')
+    monthly_prophet_df = pd.read_csv(monthly_prophet_df_path)
+
+    # Convert 'Check In' to datetime and standardize format
+    monthly_prophet_df['Check In'] = pd.to_datetime(monthly_prophet_df['Check In']).dt.tz_localize(None)
+    
+    # Merge SARIMAX and Prophet forecasts
+
+    print(monthly_forecast_sarimax_df.columns)
+    print(monthly_prophet_df.columns)
+    print(monthly_forecast_sarimax_df.head())
+    print(monthly_prophet_df.head())
+
+    combined_monthly_forecast_df = pd.merge(monthly_forecast_sarimax_df, monthly_prophet_df, on='Check In', how='inner')
+
+    if not combined_monthly_forecast_df.empty:
+        # Calculate hybrid forecast
+        combined_monthly_forecast_df['Hybrid_Forecast'] = combined_monthly_forecast_df[['SARIMAX_Forecast', 'Forecasted_Total']].mean(axis=1)
+
+        print("SARIMAX Forecast Dates:")
+        print(monthly_forecast_sarimax_df['Check In'])
+
+        print("Prophet Forecast Dates:")
+        print(monthly_prophet_df['Check In'])
+        # Check the length of both DataFrames to ensure they are expected
+        print(f"Length of SARIMAX DataFrame: {len(monthly_forecast_sarimax_df)}")
+        print(f"Length of Prophet DataFrame: {len(monthly_prophet_df)}")
+
+        # Visualization
+        trace_sarimax = go.Scatter(x=combined_monthly_forecast_df['Check In'], y=combined_monthly_forecast_df['SARIMAX_Forecast'], mode='lines', name='SARIMAX Forecast')
+        trace_prophet = go.Scatter(x=combined_monthly_forecast_df['Check In'], y=combined_monthly_forecast_df['Forecasted_Total'], mode='lines', name='Prophet Forecast')
+        trace_hybrid = go.Scatter(x=combined_monthly_forecast_df['Check In'], y=combined_monthly_forecast_df['Hybrid_Forecast'], mode='lines', name='Hybrid Forecast')
+
+        layout = go.Layout(title='Monthly Forecast Comparison: SARIMAX vs. Prophet vs. Hybrid', xaxis=dict(title='Date'), yaxis=dict(title='Forecasted Revenue'))
+
+        fig = go.Figure(data=[trace_sarimax, trace_prophet, trace_hybrid], layout=layout)
+        fig.update_layout(title='Forecasted Monthly Revenue', xaxis_title='Date', yaxis_title='Revenue (£)')
+
+        plot_div_monthly = fig.to_html(full_html=False)
+    else:
+        print("The merged forecast DataFrame is empty. Check the alignment of dates.")
+        plot_div_monthly = None
+
+# Add plot_div_monthly to the context dictionary passed to the template where it's needed
+
+
+    # yearly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_yearly.csv')
+    # yearly_forecast_sarimax_df = pd.read_csv(yearly_forecast_sarimax_df_path)
+
+    # if 'Check In' not in yearly_forecast_sarimax_df.columns:
+    #     raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    # yearly_forecast_sarimax_df['Check In'] = pd.to_datetime(yearly_forecast_sarimax_df['Check In'])
+    # yearly_forecast_sarimax_df = yearly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    # future_start_date = '2024-01-01' #change to final date in csv
+    # future_end_date_yearly = pd.date_range(start='2024-01-01', periods=5, freq='Y')
+    # #end_date_yearly = yearly_forecast_sarimax_df['Check In']
+    
+    # fig4 = Figure()
+    # # Example plot for future forecasts
+    # fig4.add_trace(Scatter(x=future_end_date_yearly, y=yearly_forecast_sarimax_df, mode='lines+markers', name='yearly Forecast'))
+    #                       # output_type='div', include_plotlyjs=False)
+    # fig4.update_layout(title='Forecasted yearly Revenue', xaxis_title='Date', yaxis_title='Revenue (£)')
+    # plot_div_yearly = fig4.to_html(full_html=False)
+    # ________________________________________________________-
+
+    yearly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_yearly.csv')
+    yearly_forecast_sarimax_df = pd.read_csv(yearly_forecast_sarimax_df_path)
+
+    # Ensure 'Check In' column is present
+    if 'Check In' not in yearly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {yearly_forecast_sarimax_df.columns.tolist()}")
+
+    # Convert 'Check In' to datetime
+    #monthly_forecast_sarimax_df['Check In'] = pd.to_datetime(monthly_forecast_sarimax_df['Check In']).dt.tz_localize(None)
+    yearly_forecast_sarimax_df = pd.DataFrame({
+        'Check In': pd.date_range(start=future_start_date, periods=len(yearly_forecast_sarimax_df), freq='Y'),
+        'SARIMAX_Forecast': yearly_forecast_sarimax_df['Forecasted_Total']  # Assuming future_forecast_weekly is correctly populated with forecast values
+    })
+
+    yearly_forecast_sarimax_df = yearly_forecast_sarimax_df[:-1]
+    # Load monthly Prophet forecasts
+    yearly_prophet_df_path = os.path.join(settings.BASE_DIR, 'forecasts_prophet_yearly.csv')
+    yearly_prophet_df = pd.read_csv(yearly_prophet_df_path)
+
+    # Convert 'Check In' to datetime and standardize format
+    yearly_prophet_df = yearly_prophet_df[:-1]
+    yearly_prophet_df['Check In'] = pd.to_datetime(yearly_prophet_df['Check In']).dt.tz_localize(None)
+    
+    # Merge SARIMAX and Prophet forecasts
+
+    print(yearly_forecast_sarimax_df.columns)
+    print(yearly_prophet_df.columns)
+    print(yearly_forecast_sarimax_df.head())
+    print(yearly_prophet_df.head())
+
+    combined_yearly_forecast_df = pd.merge(yearly_forecast_sarimax_df, yearly_prophet_df, on='Check In', how='inner')
+
+    if not combined_yearly_forecast_df.empty:
+        # Calculate hybrid forecast
+        combined_yearly_forecast_df['Hybrid_Forecast'] = combined_yearly_forecast_df[['SARIMAX_Forecast', 'Forecasted_Total']].mean(axis=1)
+
+        print("SARIMAX Forecast Dates:")
+        print(yearly_forecast_sarimax_df['Check In'])
+
+        print("Prophet Forecast Dates:")
+        print(yearly_prophet_df['Check In'])
+        # Check the length of both DataFrames to ensure they are expected
+        print(f"Length of SARIMAX DataFrame: {len(yearly_forecast_sarimax_df)}")
+        print(f"Length of Prophet DataFrame: {len(yearly_prophet_df)}")
+
+        # Visualization
+        trace_sarimax = go.Scatter(x=combined_yearly_forecast_df['Check In'], y=combined_yearly_forecast_df['SARIMAX_Forecast'], mode='lines', name='SARIMAX Forecast')
+        trace_prophet = go.Scatter(x=combined_yearly_forecast_df['Check In'], y=combined_yearly_forecast_df['Forecasted_Total'], mode='lines', name='Prophet Forecast')
+        trace_hybrid = go.Scatter(x=combined_yearly_forecast_df['Check In'], y=combined_yearly_forecast_df['Hybrid_Forecast'], mode='lines', name='Hybrid Forecast')
+
+        layout = go.Layout(title='Yearly Forecast Comparison: SARIMAX vs. Prophet vs. Hybrid', xaxis=dict(title='Date'), yaxis=dict(title='Forecasted Revenue'))
+
+        fig = go.Figure(data=[trace_sarimax, trace_prophet, trace_hybrid], layout=layout)
+        fig.update_layout(title='Forecasted Yearly Revenue', xaxis_title='Date', yaxis_title='Revenue (£)')
+
+        plot_div_yearly = fig.to_html(full_html=False)
+    else:
+        print("The merged forecast DataFrame is empty. Check the alignment of dates.")
+        plot_div_yearly = None
+        
+    # forecast_sarimax_df_bookings_path = os.path.join(settings.BASE_DIR, 'forecasts_bookings.csv')
+    # forecast_sarimax_df_bookings = pd.read_csv(forecast_sarimax_df_bookings_path)
+    
+    # fig5 = Figure()
+    # fig5.add_trace(Scatter(x=forecast_sarimax_df_bookings['Check In'], y=forecast_sarimax_df_bookings['Forecasted_Total'], mode='lines', name='Predicted Bookings'))
+    # plot_div_bookings = fig5.to_html(full_html=False)
+
+    # weekly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_weekly_bookings.csv')
+    # weekly_forecast_sarimax_df = pd.read_csv(weekly_forecast_sarimax_df_path)
+
+    # if 'Check In' not in weekly_forecast_sarimax_df.columns:
+    #     raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    # weekly_forecast_sarimax_df['Check In'] = pd.to_datetime(weekly_forecast_sarimax_df['Check In'])
+    # weekly_forecast_sarimax_df = weekly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    # future_start_date = '2024-01-01' #change to final date in csv
+    # future_end_date_weekly = pd.date_range(start=future_start_date, periods=54, freq='W')
+    # #end_date_weekly = weekly_forecast_sarimax_df['Check In']
+    
+ 
+    
+    # fig2 = Figure()
+    # # Example plot for future forecasts
+    # fig2.add_trace(Scatter(x=future_end_date_weekly, y=weekly_forecast_sarimax_df, mode='lines+markers', name='Weekly Forecast'))
+    #                       # output_type='div', include_plotlyjs=False)
+    # fig2.update_layout(title='Forecasted Weekly Bookings', xaxis_title='Date', yaxis_title='Total Bookings')
+    # plot_div_weekly_bookings = fig2.to_html(full_html=False)
+    #-------------------------------------
+    forecast_sarimax_df_bookings_path = os.path.join(settings.BASE_DIR, 'forecasts_bookings.csv')
+    forecast_sarimax_df_bookings = pd.read_csv(forecast_sarimax_df_bookings_path)
+
+    # Load Prophet forecasts
+ 
+
+    # Assuming actual_df is loaded similarly for test data period
+    actual_bookings_df_path = os.path.join(settings.BASE_DIR, 'actual_bookings.csv')
+    actual_bookings_df = pd.read_csv(actual_bookings_df_path)
+    actual_bookings_df['Check In'] = pd.to_datetime(actual_bookings_df['Check In'])
+
+    # Ensure test_data range is defined
+    test_data_start_date = '2022-06-12'  # Adjust to your test data's start date
+    test_data_end_date = '2023-06-04'    # Adjust to your test data's end date
+
+    # Filter the forecasts and actual data for the test data period
+    forecast_sarimax_df_bookings = forecast_sarimax_df_bookings[(forecast_sarimax_df_bookings['Check In'] >= test_data_start_date) & (forecast_sarimax_df_bookings['Check In'] <= test_data_end_date)]
+    actual_bookings_df = actual_bookings_df[(actual_bookings_df['Check In'] >= test_data_start_date) & (actual_bookings_df['Check In'] <= test_data_end_date)]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=forecast_sarimax_df_bookings['Check In'], y=actual_bookings_df['Number_of_Bookings'], mode='lines', name='Actual Bookings'))
+    fig.add_trace(go.Scatter(x=forecast_sarimax_df_bookings['Check In'], y=forecast_sarimax_df_bookings['Forecasted_Total'], mode='lines', name='SARIMAX Prediction'))
+    fig.update_layout(title="Forecast vs Actual Comparison for Test Period", xaxis_title="Date", yaxis_title="Total Bookings")
+
+    plot_div_bookings = plot(fig, output_type='div')
+    #-------------------------------------
+
+    
+    weekly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_weekly_bookings.csv')
+    weekly_forecast_sarimax_df = pd.read_csv(weekly_forecast_sarimax_df_path)
+
+    if 'Check In' not in weekly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    weekly_forecast_sarimax_df['Check In'] = pd.to_datetime(weekly_forecast_sarimax_df['Check In'])
+    weekly_forecast_sarimax_df = weekly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    future_start_date = '2024-01-01' #change to final date in csv
+    future_end_date_weekly = pd.date_range(start=future_start_date, periods=54, freq='W')
+    #end_date_weekly = weekly_forecast_sarimax_df['Check In']
+    
+ 
+    
+    fig2 = Figure()
+    # Example plot for future forecasts
+    fig2.add_trace(Scatter(x=future_end_date_weekly, y=weekly_forecast_sarimax_df, mode='lines+markers', name='Weekly Forecast'))
+                          # output_type='div', include_plotlyjs=False)
+    fig2.update_layout(title='Forecasted Weekly Bookings', xaxis_title='Date', yaxis_title='Total Bookings')
+    plot_div_weekly_bookings = fig2.to_html(full_html=False)
+
+    monthly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_monthly_bookings.csv')
+    monthly_forecast_sarimax_df = pd.read_csv(monthly_forecast_sarimax_df_path)
+
+    if 'Check In' not in monthly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    monthly_forecast_sarimax_df['Check In'] = pd.to_datetime(monthly_forecast_sarimax_df['Check In'])
+    monthly_forecast_sarimax_df = monthly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    future_start_date = '2024-01-01' #change to final date in csv
+    future_end_date_monthly = pd.date_range(start='2024-01-01', end='2024-12-31', freq='MS')
+
+    
+    #end_date_monthly = monthly_forecast_sarimax_df['Check In']
+    
+    fig3 = Figure()
+    # Example plot for future forecasts
+    fig3.add_trace(Scatter(x=future_end_date_monthly, y=monthly_forecast_sarimax_df, mode='lines+markers', name='monthly Forecast'))
+                          # output_type='div', include_plotlyjs=False)
+    fig3.update_layout(title='Forecasted monthly Bookings', xaxis_title='Date', yaxis_title='Total Bookings')
+    plot_div_monthly_bookings = fig3.to_html(full_html=False)
+
+    yearly_forecast_sarimax_df_path = os.path.join(settings.BASE_DIR, 'forecasts_yearly_bookings.csv')
+    yearly_forecast_sarimax_df = pd.read_csv(yearly_forecast_sarimax_df_path)
+
+    if 'Check In' not in yearly_forecast_sarimax_df.columns:
+        raise ValueError(f"'Check In' column is missing in the loaded DataFrame. Available columns: {forecast_sarimax_df.columns.tolist()}")
+
+   
+    yearly_forecast_sarimax_df['Check In'] = pd.to_datetime(yearly_forecast_sarimax_df['Check In'])
+    yearly_forecast_sarimax_df = yearly_forecast_sarimax_df['Forecasted_Total']  # Assuming the column name is 'Forecast'
+    future_start_date = '2024-01-01' #change to final date in csv
+    future_end_date_yearly = pd.date_range(start='2024-01-01', periods=5, freq='Y')
+    #end_date_yearly = yearly_forecast_sarimax_df['Check In']
+    
+    fig4 = Figure()
+    # Example plot for future forecasts
+    fig4.add_trace(Scatter(x=future_end_date_yearly, y=yearly_forecast_sarimax_df, mode='lines+markers', name='yearly Forecast'))
+                          # output_type='div', include_plotlyjs=False)
+    fig4.update_layout(title='Forecasted yearly Bookings', xaxis_title='Date', yaxis_title='Total Bookings')
+    plot_div_yearly_bookings = fig4.to_html(full_html=False)
+
+   # return render(request, 'forecasts/dashboard.html', {'plot_div': plot_div})
+    return render(request, 'forecasts/dashboard.html', {
+        'plot_div': plot_div,
+        'plot_div_weekly': plot_div_weekly,
+        'plot_div_monthly': plot_div_monthly,
+        'plot_div_yearly': plot_div_yearly,
+        'plot_div_bookings':plot_div_bookings,
+        'plot_div_weekly_bookings':plot_div_weekly_bookings,
+        'plot_div_monthly_bookings':plot_div_monthly_bookings,
+        'plot_div_yearly_bookings':plot_div_yearly_bookings,
+    })
+
+
+############################################################################# tasks.py
+
+from __future__ import absolute_import, unicode_literals
+
+from django.shortcuts import render
+
+# Create your views here.
+import pandas as pd
+from django.shortcuts import render, redirect
+from .forms import UploadFileForm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from plotly.offline import plot
+from plotly.graph_objs import Scatter
+
+from django.shortcuts import render
+import pandas as pd
+from django.conf import settings
+import os
+from plotly.offline import plot
+from plotly.graph_objs import Scatter, Layout
+import pandas as pd
+from pandas.tseries.offsets import DateOffset
+from plotly.graph_objs import Scatter, Layout, Figure
+
+import pandas as pd
+from django.conf import settings
+import os
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import numpy as np
+from .models import BookingData
+from django.db.models import Max
+from django.utils import timezone
+from django.db import transaction
+
+from forecasts.models import BookingData, OptimizationParameters
+import itertools
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import warnings
+from django.db.models import Max
+warnings.filterwarnings("ignore")
+from django.db.models import Sum
+from django.db.models.functions import ExtractWeek, ExtractYear
+from celery import shared_task
+#from .celery import app
+from forecasting.celery import app
+from celery import shared_task
+from prophet import Prophet
+from sklearn.metrics import mean_squared_error
+import numpy as np
+from forecasts.models import BookingData, ProphetOptimizationParameters
+import pandas as pd
+from django.db.models.functions import ExtractWeek, ExtractYear
+from django.db.models import Sum
+
+from celery import shared_task
+from prophet import Prophet
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_squared_error
+from django.db.models.functions import ExtractWeek, ExtractYear
+from django.db.models import Sum
+from .models import BookingData, ProphetOptimizationParameters
+
+#from background_task import background
+#from .models import SystemParameter  # Assuming you have a model like this
+
+# @background(schedule=1)
+# def optimize_system_parameters():
+#     # Your optimization logic here
+#     parameters = SystemParameter.objects.all()
+#     for parameter in parameters:
+#         # Optimization logic
+#         pass
+
+    # Optionally update something to signal completion, like a model field
+
+
+# @app.task #shared_task
+# def add(x, y):
+#     return x + y
+#from celery.utils.log import get_task_logger
+#from django.http import HttpResponse
+
+#logger = get_task_logger(__name__)
+#@shared_task
+#@app.task
+
+def test_logging_task():
+    #logger.info("Test logging task started.")
+    #return HttpResponse('Test works')
+    print('Test works')
+
+
+#@shared_task
+def ts_cross_val_rmse(y, order, seasonal_order, cv=3):
+    n_records = len(y)
+    fold_size = n_records // cv
+    errors = []
+
+    for i in range(cv):
+        start_test = i * fold_size
+        if i == cv - 1:
+            end_test = n_records
+        else:
+            end_test = (i + 1) * fold_size
+
+        train = y[:start_test]
+        test = y[start_test:end_test]
+
+        model = SARIMAX(train, order=order, seasonal_order=seasonal_order,
+                        enforce_stationarity=False, enforce_invertibility=False)
+        model_fit = model.fit(disp=False)
+        forecast = model_fit.forecast(steps=len(test))
+
+        rmse = np.sqrt(mean_squared_error(test, forecast))
+        errors.append(rmse)
+
+    return np.mean(errors)
+
+
+
+# #@shared_task
+# @app.task 
+# def optimize_parameters_async():
+#     # Assuming you have a function `optimize_parameters()` as defined in previous steps
+#     #optimize_parameters()
+#  OptimizationParameters.objects.create(p=1, d=0, q=1, seasonal_p=2, seasonal_d=1, seasonal_q=0, s=12)
+
+from celery.utils.log import get_task_logger
+logger = get_task_logger(__name__)
+#@background(schedule=1)
+@shared_task
+def optimize_parameters():
+    # Fetch the aggregated data from your BookingData model
+    # You might need to adjust this query based on how your data is structured
+    logger.info("Starting optimization of parameters.")
+    try:
+
+        data = BookingData.objects.annotate(
+            week=ExtractWeek('check_in'),
+            year=ExtractYear('check_in')
+        ).values('year', 'week').annotate(total=Sum('total')).order_by('year', 'week')
+
+        # Convert to DataFrame for processing
+        df = pd.DataFrame(list(data))
+        df['date'] = pd.to_datetime(df['year'].astype(str), format='%Y') + pd.to_timedelta(df['week'].mul(7).astype(str) + ' days')
+
+        # Assuming 'total' is the column you want to forecast
+        train_data = df.set_index('date')['total']
+
+        # Optimization logic from your initial file...
+        # Define the parameter space
+        p = [0, 1]  # Possible p values
+        d = [0, 1]  # Possible d values
+        q = [0, 1, 3]  # Possible q values
+        seasonal_p = [2, 3]
+        seasonal_d = [0, 1]
+        seasonal_q = [0, 1]
+        s = 12
+        pdq = list(itertools.product(p, d, q))
+        #seasonal_pdq = [(x[0], x[1], x[2], s) for x in list(itertools.product(seasonal_p, seasonal_d, seasonal_q))]
+
+        seasonal_pdq = []
+        for sp in seasonal_p:
+            for sd in seasonal_d:
+                for sq in seasonal_q:
+                    if (sd == 0 and sq == 0) or (sd == 0 and sq == 1):  # Exclude (x, 0, 0, 12) and (x, 0, 1, 12)
+                        continue
+                    if sd == 0 and sq != 0:  # Allow (x, 0, x!=0, 12)
+                        seasonal_pdq.append((sp, sd, sq, s))
+                    elif sd != 0 and sq == 0:  # Allow (x, x!=0, 0, 12)
+                        seasonal_pdq.append((sp, sd, sq, s))
+        
+        best_score, best_cfg = float("inf"), None
+        for param in pdq:
+            if param == (0, 1, 0) and any(sd == 0 for (_, sd, _, _) in seasonal_pdq):
+                continue
+            for param_seasonal in seasonal_pdq:
+                try:
+                    logger.info("Optimization completed successfully.")
+                    rmse = ts_cross_val_rmse(train_data, order=param, seasonal_order=param_seasonal, cv=3)
+                    if rmse < best_score:
+                        best_score, best_cfg = rmse, (param, param_seasonal)
+                    print('SARIMAX{}x{} - RMSE:{}'.format(param, param_seasonal, rmse))
+                    logger.info('SARIMAX{}x{} - RMSE:{}'.format(param, param_seasonal, rmse))
+
+                except Exception as e:
+                    logger.error(f"Optimization failed with an exception: {e}", exc_info=True)
+                    continue
+
+        print(f"Saving optimal parameters to database: {best_cfg}")
+        logger.info(f"Saving optimal parameters to database: {best_cfg}")
+
+        # Saving the best parameters to the database
+        OptimizationParameters.objects.create(
+            p=best_cfg[0][0],
+            d=best_cfg[0][1],
+            q=best_cfg[0][2],
+            seasonal_p=best_cfg[1][0],
+            seasonal_d=best_cfg[1][1],
+            seasonal_q=best_cfg[1][2],
+            s=best_cfg[1][3]
+        )
+    except Exception as e:
+        logger.error(f"Failed to complete optimize_parameters: {e}", exc_info=True)
+        raise e
+    
+@shared_task
+def add(x,y):
+    result = x + y
+    logger.info(f'Adding {x} + {y} = {result}')
+    return result
+
+# from celery.signals import task_prerun
+
+# @task_prerun.connect
+# def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **kwds):
+#     if sender.name == 'forecasts.views.optimize_parameters_async':
+#         logger.info(f"Task {sender.name} [{task_id}] starting")
+
+# from celery.signals import task_postrun
+
+# @task_postrun.connect
+# def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, retval=None, state=None, **kwds):
+#     if sender.name == 'forecasts.views.optimize_parameters_async':
+#         logger.info(f"Task {sender.name} [{task_id}] completed with state: {state}")
+
+
+@shared_task
+def optimize_prophet_parameters():
+    # Aggregate data
+    data = BookingData.objects.annotate(
+        week=ExtractWeek('check_in'),
+        year=ExtractYear('check_in')
+    ).values('year', 'week').annotate(total=Sum('total')).order_by('year', 'week')
+
+    # Convert to DataFrame
+    df = pd.DataFrame(list(data))
+    df['date'] = pd.to_datetime(df['year'].astype(str), format='%Y') + pd.to_timedelta(df['week'].mul(7).astype(str) + ' days')
+    prophet_data = df[['date', 'total']].rename(columns={'date': 'ds', 'total': 'y'})
+
+    param_grid = {
+        'yearly_seasonality': [True, False],
+        'changepoint_prior_scale': [0.05, 0.1, 0.5, 1.0],
+        'seasonality_prior_scale': [0.1, 1.0, 10.0, 12.0, 15.0]
+    }
+
+    best_rmse = float('inf')
+    best_params = {}
+
+    # Perform grid search
+    for changepoint_prior_scale in param_grid['changepoint_prior_scale']:
+        for seasonality_prior_scale in param_grid['seasonality_prior_scale']:
+            model = Prophet(weekly_seasonality=True,
+                            yearly_seasonality=param_grid['yearly_seasonality'][0],
+                            changepoint_prior_scale=changepoint_prior_scale,
+                            seasonality_prior_scale=seasonality_prior_scale)
+            try:
+                model.fit(prophet_data)
+                future = model.make_future_dataframe(periods=52, freq='W')  # Assuming 52 weeks forecast
+                forecast = model.predict(future)
+                actual = prophet_data.set_index('ds')['y']
+                predicted = forecast.set_index('ds')['yhat'][:len(actual)]
+                rmse = calculate_rmse(actual, predicted)
+                
+                if rmse < best_rmse:
+                    best_rmse = rmse
+                    best_params = {
+                        'changepoint_prior_scale': changepoint_prior_scale,
+                        'seasonality_prior_scale': seasonality_prior_scale,
+                        'yearly_seasonality': param_grid['yearly_seasonality'][0]
+                    }
+            except Exception as e:
+                print(f"An error occurred with parameters: {best_params}. Error: {e}")
+
+    # Save or update best parameters
+    ProphetOptimizationParameters.objects.update_or_create(
+        defaults={
+            'changepoint_prior_scale': best_params['changepoint_prior_scale'],
+            'seasonality_prior_scale': best_params['seasonality_prior_scale'],
+            'yearly_seasonality': best_params['yearly_seasonality'],
+            'rmse': best_rmse
+        }
+    )
