@@ -19,21 +19,25 @@ This Django application allows users to upload CSV files, generate forecasts, an
 python -m venv env
 source env/bin/activate  # Unix/MacOS
 env\Scripts\activate    # Windows
-2. Install Dependencies
-bash
+```
+
+### 2. Install Dependencies
+```
 pip install django pandas numpy celery redis psycopg2 prophet statsmodels sklearn plotly
-3. Database & Redis
+```
+### 3. Database & Redis
 Set up PostgreSQL database
 
 Start Redis server:
 
-bash
+```
 sudo service redis-server start
 redis-cli ping  # Should return "PONG"
-4. Configure Settings
+```
+### 4. Configure Settings
 Update forecasting/settings.py with your database credentials:
 
-python
+```
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -44,27 +48,30 @@ DATABASES = {
         'PORT': '5432',
     }
 }
-5. Database Migrations
-bash
+```
+### 5. Database Migrations
+```
 python manage.py makemigrations
 python manage.py migrate
-6. Run Services
+```
+### 6. Run Services
 In separate terminals:
 
-bash
+```
 # Start Celery worker
 celery -A forecasting worker -l info --pool=solo
-
+```
+```
 # Start development server (bind to all interfaces)
 python manage.py runserver 0.0.0.0:8000
 Access the app at: http://localhost:8000
-
-Production Setup with Nginx & HTTPS (Without Gunicorn)
-1. Install and Configure Nginx
-bash
-sudo apt install nginx
+```
+### Production Setup with Nginx & HTTPS
+### 1. Install and Configure Nginx
+```sudo apt install nginx
+```
 Create /etc/nginx/sites-available/forecasting:
-
+```
 nginx
 server {
     listen 80;
@@ -88,22 +95,25 @@ server {
         expires 30d;
     }
 }
+```
 Enable the site:
 
-bash
+```
 sudo ln -s /etc/nginx/sites-available/forecasting /etc/nginx/sites-enabled/
 sudo nginx -t  # Test configuration
 sudo systemctl restart nginx
-2. Configure HTTPS with Let's Encrypt
-bash
+```
+### 2. Configure HTTPS with Let's Encrypt
+```
 sudo apt install certbot python3-certbot-nginx
 sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
+```
 Follow prompts to configure HTTPS and certificate renewal.
 
-3. Update Django Settings
+### 3. Update Django Settings
 In settings.py:
 
-python
+```
 # Security settings
 ALLOWED_HOSTS = ['yourdomain.com', 'www.yourdomain.com']
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -113,12 +123,14 @@ CSRF_COOKIE_SECURE = True
 # Static files
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+```
 Collect static files:
 
-bash
+```
 python manage.py collectstatic
-4. Start Production Services
-bash
+```
+### 4. Start Production Services
+```
 # Start Django development server (on port 8000)
 python manage.py runserver 0.0.0.0:8000
 
@@ -127,8 +139,9 @@ sudo service redis-server start
 
 # Start Celery
 celery -A forecasting worker -l info --pool=solo
+```
 Security Considerations
-While this setup uses Nginx for HTTPS termination, be aware of these limitations:
+### While this setup uses Nginx for HTTPS termination, be aware of these limitations:
 
 Django Development Server Limitations:
 
@@ -163,13 +176,15 @@ Automatic certificate renewal
 Maintenance
 Renew SSL certificates:
 
-bash
+```
 sudo certbot renew --dry-run
+```
 Check Nginx status:
 
-bash
+```
 sudo systemctl status nginx
 sudo tail -f /var/log/nginx/error.log
+```
 Monitor Django server (restart manually if crashes)
 
 When to Use This Configuration
@@ -192,5 +207,18 @@ Implement proper process monitoring (systemd/supervisor)
 Use a dedicated application server for Django
 
 Implement additional security hardening
+
+### Application Functionality Notes
+To see full forecasting functionality, upload the Adfan_Integrum_Insights.csv file
+
+After upload, the system will:
+
+Process the CSV data
+
+Generate time-series forecasts
+
+Display interactive visualizations
+
+Show statistical analytics
 
 Access the application at: https://yourdomain.com/forecasts/upload/
